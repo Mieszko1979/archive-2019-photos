@@ -13,57 +13,73 @@ def get_decimal_from_dms(dms, ref):
         return -val if ref in ['S', 'W'] else val
     except: return None
 
-def process_image(image_path):
+def get_gps_from_file(image_path):
     try:
-        # Открываем изображение
-        img = Image.open(image_path)
-        exif_raw = img.info.get('exif') # Сохраняем "сырые" метаданные
-        
-        # 1. Извлекаем GPS
-        exif_data = img._getexif()
-        coords = None
-        if exif_data:
+        with Image.open(image_path) as img:
+            exif = img._getexif()
+            if not exif: return None
             gps = {}
-            for tag, val in exif_data.items():
+            for tag, val in exif.items():
                 decoded = TAGS.get(tag, tag)
                 if decoded == "GPSInfo":
                     for t in val: gps[GPSTAGS.get(t, t)] = val[t]
-            
             if "GPSLatitude" in gps:
-                coords = {
+                return {
                     "lat": get_decimal_from_dms(gps["GPSLatitude"], gps.get("GPSLatitudeRef")),
                     "lng": get_decimal_from_dms(gps["GPSLongitude"], gps.get("GPSLongitudeRef", "E"))
                 }
+    except: return None
+    return None
 
-        # 2. Сжатие и поворот
-        img = ImageOps.exif_transpose(img)
-        if img.width > MAX_SIZE or img.height > MAX_SIZE:
-            img.thumbnail((MAX_SIZE, MAX_SIZE), Image.Resampling.LANCZOS)
-            # СОХРАНЯЕМ С EXIF (чтобы координаты не стерлись в будущем)
-            if exif_raw:
-                img.save(image_path, "JPEG", quality=85, optimize=True, exif=exif_raw)
-            else:
+def resize_image(image_path):
+    try:
+        with Image.open(image_path) as img:
+            img = ImageOps.exif_transpose(img)
+            if img.width > MAX_SIZE or img.height > MAX_SIZE:
+                img.thumbnail((MAX_SIZE, MAX_SIZE), Image.Resampling.LANCZOS)
                 img.save(image_path, "JPEG", quality=85, optimize=True)
-            print(f"Обработано и сжато: {image_path}")
-        
-        return coords
-    except Exception as e:
-        print(f"Ошибка в {image_path}: {e}")
-        return None
+                return True
+    except: return False
+    return False
 
-# ГЛАВНЫЙ ЦИКЛ
-photos_data = []
+# --- ГЛАВНАЯ ЛОГИКА ЗАЩИТЫ ВАШИХ ПРАВОК ---
+
+# 1. Читаем существующий photos.json
+existing_photos = {}
+if os.path.exists('photos.json'):
+    try:
+        with open('photos.json', 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            for item in data:
+                # Запоминаем координаты, которые вы ввели вручную
+                existing_photos[item['url']] = {"lat": item['lat'], "lng": item['lng']}
+    except Exception as e:
+        print(f"Предупреждение: не удалось прочитать photos.json: {e}")
+
+new_photos_list = []
+# 2. Получаем список всех JPG файлов в папке
 files = [f for f in os.listdir('.') if f.lower().endswith(('.jpg', '.jpeg'))]
 
 for file in files:
-    res = process_image(file)
-    if res and res["lat"] is not None:
-        photos_data.append({"url": file, "lat": res["lat"], "lng": res["lng"]})
-        print(f"Добавлено: {file} ({res['lat']}, {res['lng']})")
+    # 3. Если фото уже есть в JSON — БЕРЕМ ВАШИ КООРДИНАТЫ ИЗ ФАЙЛА
+    if file in existing_photos:
+        coords = existing_photos[file]
+        print(f"Сохраняем ваши правки для: {file}")
+    else:
+        # 4. Если фото абсолютно новое — вытаскиваем GPS и сжимаем
+        coords = get_gps_from_file(file)
+        if coords:
+            print(f"Новое фото найдено: {file}. Извлекаем GPS...")
+            resize_image(file)
+        else:
+            print(f"В новом фото {file} нет GPS-данных!")
 
-# Записываем photos.json
-photos_data.sort(key=lambda x: x['url'])
-with open('photos.json', 'w') as f:
-    json.dump(photos_data, f, indent=4)
+    if coords:
+        new_photos_list.append({"url": file, "lat": coords["lat"], "lng": coords["lng"]})
 
-print(f"Завершено! В списке {len(photos_data)} фото.")
+# 5. Сохраняем итоговый список
+new_photos_list.sort(key=lambda x: x['url'])
+with open('photos.json', 'w', encoding='utf-8') as f:
+    json.dump(new_photos_list, f, indent=4, ensure_ascii=False)
+
+print(f"Готово! В списке: {len(new_photos_list)} фото. Ваши правки защищены.")
